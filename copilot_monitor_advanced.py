@@ -259,8 +259,8 @@ class AdvancedCopilotMonitor:
             pyautogui.hotkey('win', 'r')
             time.sleep(0.5)
             
-                                      # 构造一个命令来操作VS Code
-             command = f'powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait(\\"{self.continue_command}{{{{ENTER}}}}\\")"'
+            # 构造一个命令来操作VS Code
+            command = f'powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait(\\"{self.continue_command}{{{{ENTER}}}}\\")"'
             
             pyautogui.write(command)
             pyautogui.press('enter')
