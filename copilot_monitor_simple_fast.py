@@ -27,11 +27,11 @@ class FastCopilotMonitor:
         self.running = False
         self.last_action_time = 0.0
         
-        # 简化设置 - 只要停止超过2分钟就判断为停止
+        # 简化设置 - 只要停止超过30秒就判断为停止
         self.check_interval = 5   # 5秒检查一次
         self.static_threshold = 3  # 连续3次相同即开始计时 (减少误判)
         self.cooldown_time = 30   # 30秒冷却时间
-        self.min_static_duration = 30  # 最小静止时间：2分钟
+        self.min_static_duration = 30  # 最小静止时间：30秒
         
         self.vscode_title = 'Visual Studio Code'
         self.continue_command = 'continue'
@@ -349,12 +349,12 @@ class FastCopilotMonitor:
             return {}
 
     def analyze_status_by_pixels(self, image: np.ndarray) -> str:
-        """简化状态分析 - 只要停止超过2分钟就判断为停止"""
+        """简化状态分析 - 只要停止超过30秒就判断为停止"""
         self.detection_stats['total_checks'] += 1
         
         self.logger.debug("🔍 开始状态分析...")
         
-        # 主要检测：内容是否停止超过2分钟
+        # 主要检测：内容是否停止超过30秒
         is_truly_stopped = self.detect_static_content(image)
         
         # 辅助检测
@@ -363,9 +363,9 @@ class FastCopilotMonitor:
         
         # 简化的状态判断逻辑
         if is_truly_stopped:
-            # 停止超过2分钟
+            # 停止超过30秒
             status = "stopped"
-            self.logger.info("🛑 状态判断: STOPPED (停止超过2分钟)")
+            self.logger.info("🛑 状态判断: STOPPED (停止超过30秒)")
         elif has_loading_animation:
             status = "thinking"
             self.logger.info("🤔 状态判断: THINKING (检测到加载动画)")
@@ -373,20 +373,20 @@ class FastCopilotMonitor:
             status = "waiting_input"
             self.logger.info("⌨️ 状态判断: WAITING_INPUT (检测到光标活动)")
         elif self.static_counter > 0:
-            # 正在停止中，但还没到2分钟
+            # 正在停止中，但还没到30秒
             status = "active"
             remaining_time = 0
             if self.static_start_time:
                 elapsed = time.time() - self.static_start_time
                 remaining_time = max(0, self.min_static_duration - elapsed)
-            self.logger.info(f"🟡 状态判断: ACTIVE (停止中，还需 {remaining_time:.1f}秒到2分钟)")
+            self.logger.info(f"🟡 状态判断: ACTIVE (停止中，还需 {remaining_time:.1f}秒到30秒)")
         else:
             status = "active"
             self.logger.info("🟢 状态判断: ACTIVE (内容变化中)")
         
         # 输出简化的检测结果
         self.logger.debug("📊 检测结果:")
-        self.logger.debug(f"   停止超过2分钟: {is_truly_stopped}")
+        self.logger.debug(f"   停止超过30秒: {is_truly_stopped}")
         self.logger.debug(f"   停止计数: {self.static_counter}/{self.static_threshold}")
         self.logger.debug(f"   光标活动: {has_cursor_activity}")
         self.logger.debug(f"   加载动画: {has_loading_animation}")
@@ -415,6 +415,77 @@ class FastCopilotMonitor:
         except Exception as e:
             self.logger.debug(f"❌ Chat窗口检查失败: {e}")
             return False
+    
+    def find_chat_input_box(self, window: gw.Win32Window) -> Optional[Tuple[int, int]]:
+        """智能查找Chat输入框位置"""
+        try:
+            self.logger.debug("🔍 智能查找Chat输入框位置")
+            
+            # 截取整个VS Code窗口
+            screenshot = pyautogui.screenshot(region=(
+                window.left, window.top, window.width, window.height
+            ))
+            image = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # 重点搜索右侧区域 (Chat通常在右侧)
+            right_region_start = int(image.shape[1] * 0.6)  # 从60%宽度开始
+            right_region = gray[:, right_region_start:]
+            
+            # 查找输入框的特征：
+            # 1. 水平的长矩形区域
+            # 2. 通常在底部
+            # 3. 有明显的边界
+            
+            # 检测边缘
+            edges = cv2.Canny(right_region, 50, 150)
+            
+            # 查找水平线条 (输入框的上下边界)
+            horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
+            horizontal_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, horizontal_kernel)
+            
+            # 找到水平线的位置
+            horizontal_coords = np.where(horizontal_lines > 0)
+            
+            if len(horizontal_coords[0]) > 0:
+                # 找最底部的几条水平线 (输入框通常在底部)
+                bottom_lines = []
+                height = right_region.shape[0]
+                
+                # 只考虑底部30%的区域
+                bottom_threshold = int(height * 0.7)
+                
+                for i in range(len(horizontal_coords[0])):
+                    y = horizontal_coords[0][i]
+                    x = horizontal_coords[1][i]
+                    
+                    if y > bottom_threshold:  # 在底部区域
+                        bottom_lines.append((x, y))
+                
+                if bottom_lines:
+                    # 找到最常见的y坐标 (输入框的边界)
+                    y_coords = [line[1] for line in bottom_lines]
+                    y_coords.sort()
+                    
+                    # 使用最底部的线作为输入框位置
+                    input_y_relative = y_coords[-10] if len(y_coords) > 10 else y_coords[-1]
+                    
+                    # 输入框通常在Chat面板的中央
+                    input_x_relative = right_region.shape[1] // 2
+                    
+                    # 转换为绝对坐标
+                    input_x = window.left + right_region_start + input_x_relative
+                    input_y = window.top + input_y_relative - 10  # 稍微向上偏移到输入框内部
+                    
+                    self.logger.info(f"✅ 智能检测到输入框位置: ({input_x}, {input_y})")
+                    return (input_x, input_y)
+            
+            self.logger.debug("⚠️ 未能智能检测到输入框，使用默认位置")
+            return None
+            
+        except Exception as e:
+            self.logger.warning(f"❌ 智能查找输入框失败: {e}")
+            return None
     
     def send_continue_command(self, window: gw.Win32Window) -> bool:
         """发送继续命令 - 增强版，确保真正发送成功"""
@@ -456,17 +527,43 @@ class FastCopilotMonitor:
         try:
             self.logger.debug("📝 直接输入continue命令")
             
-            # 先尝试点击聊天输入区域 (底部区域)
             # 获取窗口信息用于计算点击位置
             vscode_window = self.find_vscode_window()
             if vscode_window:
-                # 计算Chat输入框大概位置 (右下角)
-                click_x = vscode_window.left + int(vscode_window.width * 0.8)
-                click_y = vscode_window.top + int(vscode_window.height * 0.9)
+                # 首先尝试智能查找输入框
+                smart_position = self.find_chat_input_box(vscode_window)
                 
-                self.logger.debug(f"🖱️ 点击Chat输入区域: ({click_x}, {click_y})")
-                pyautogui.click(click_x, click_y)
+                if smart_position:
+                    input_x, input_y = smart_position
+                    self.logger.info(f"🎯 使用智能检测位置: ({input_x}, {input_y})")
+                else:
+                    # 备用方案：使用计算的位置
+                    # Chat面板通常占右侧40%的宽度
+                    chat_panel_left = vscode_window.left + int(vscode_window.width * 0.6)
+                    chat_panel_width = int(vscode_window.width * 0.4)
+                    
+                    # 输入框在Chat面板的最底部，但要避开滚动条
+                    input_x = chat_panel_left + int(chat_panel_width * 0.5)  # Chat面板中心
+                    input_y = vscode_window.top + vscode_window.height - 80  # 距离底部80像素，更保守
+                    
+                    self.logger.info(f"🖱️ 使用计算位置: ({input_x}, {input_y})")
+                
+                self.logger.debug(f"   窗口范围: ({vscode_window.left}, {vscode_window.top}) - ({vscode_window.left + vscode_window.width}, {vscode_window.top + vscode_window.height})")
+                
+                # 多次点击确保焦点正确
+                pyautogui.click(input_x, input_y)
+                time.sleep(0.2)
+                pyautogui.click(input_x, input_y)  # 双击确保焦点
                 time.sleep(0.3)
+                
+                # 额外尝试：按Tab键导航到输入框 (如果点击位置不对)
+                pyautogui.press('tab')
+                time.sleep(0.1)
+                pyautogui.press('tab')
+                time.sleep(0.1)
+                
+            else:
+                self.logger.warning("⚠️ 无法获取窗口信息，尝试直接输入")
             
             # 清空可能存在的内容
             pyautogui.hotkey('ctrl', 'a')  # 全选
@@ -479,13 +576,6 @@ class FastCopilotMonitor:
             # 按回车发送
             pyautogui.press('enter')
             time.sleep(0.3)
-            
-            # 简单验证：检查是否还有文本在输入框中
-            # 如果成功发送，输入框应该被清空
-            pyautogui.hotkey('ctrl', 'a')  # 全选
-            time.sleep(0.1)
-            pyautogui.hotkey('ctrl', 'c')  # 复制
-            time.sleep(0.1)
             
             self.logger.info("✅ 直接发送continue命令完成")
             self.last_action_time = time.time()
@@ -626,9 +716,9 @@ class FastCopilotMonitor:
                 
                 self.logger.info(f"📊 当前状态: {status}, 距离上次操作: {time_since_last_action:.1f}秒")
                 
-                # 检测：如果停止超过2分钟且超过冷却时间
+                # 检测：如果停止超过30秒且超过冷却时间
                 if status == "stopped" and time_since_last_action > self.cooldown_time:
-                    self.logger.info(f"🎯 Copilot已停止超过2分钟！")
+                    self.logger.info(f"🎯 Copilot已停止超过30秒！")
                     if self.send_continue_command(window):
                         self.logger.info("✅ 命令发送成功")
                         self.static_counter = 0
@@ -663,13 +753,13 @@ class FastCopilotMonitor:
     def start(self):
         """启动监控"""
         self.running = True
-        print("🚀 Copilot监控工具启动 (2分钟停止检测)")
+        print("🚀 Copilot监控工具启动 (30秒停止检测)")
         print(f"⚡ 每 {self.check_interval} 秒检测一次")
-        print(f"⚡ 停止判断: 连续停止 {self.min_static_duration} 秒 (2分钟)")
+        print(f"⚡ 停止判断: 连续停止 {self.min_static_duration} 秒")
         print(f"⚡ 检测阈值: {self.static_threshold} 次 (约 {self.static_threshold * self.check_interval} 秒)")
         print(f"⚡ 冷却时间: {self.cooldown_time} 秒")
         print(f"📝 新窗口消息: '{self.new_window_message}'")
-        print("🎯 逻辑: 只要停止超过2分钟，就发送继续命令")
+        print("🎯 逻辑: 只要停止超过30秒，就发送继续命令")
         print("📋 按 Ctrl+C 停止监控")
         print("=" * 50)
         
@@ -689,18 +779,18 @@ class FastCopilotMonitor:
 def main():
     """主函数"""
     print("🚀 VS Code Copilot Chat 监控工具")
-    print("🎯 核心逻辑: 只要停止超过2分钟，就认为Copilot停止了")
+    print("🎯 核心逻辑: 只要停止超过30秒，就认为Copilot停止了")
     print("=" * 50)
     print("⚡ 检测设置：")
     print("   • 检测间隔: 5秒")
-    print("   • 停止判断: 连续停止120秒（2分钟）")
+    print("   • 停止判断: 连续停止30秒")
     print("   • 检测阈值: 3次 (15秒后开始计时)")
     print("   • 冷却时间: 30秒")
     print()
     print("🎯 工作原理：")
     print("   • 每5秒截图检测Copilot Chat区域")
     print("   • 连续3次相同画面后开始计时")
-    print("   • 停止超过2分钟自动发送继续命令")
+    print("   • 停止超过30秒自动发送继续命令")
     print("   • 如有变化立即重新开始计时")
     print()
     print("📝 自动操作：")
