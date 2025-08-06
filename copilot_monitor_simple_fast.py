@@ -27,10 +27,11 @@ class FastCopilotMonitor:
         self.running = False
         self.last_action_time = 0.0
         
-        # 优化后的设置 - 更快检测
-        self.check_interval = 5   # 5秒检查一次（原来15秒）
-        self.static_threshold = 2  # 连续2次相同即判断静态（原来3次）
-        self.cooldown_time = 30   # 30秒冷却时间（原来60秒）
+        # 简化设置 - 只要停止超过2分钟就判断为停止
+        self.check_interval = 5   # 5秒检查一次
+        self.static_threshold = 3  # 连续3次相同即开始计时 (减少误判)
+        self.cooldown_time = 30   # 30秒冷却时间
+        self.min_static_duration = 120  # 最小静止时间：2分钟
         
         self.vscode_title = 'Visual Studio Code'
         self.continue_command = 'continue'
@@ -40,6 +41,7 @@ class FastCopilotMonitor:
         # 图像匹配设置
         self.last_screenshot_hash = None
         self.static_counter = 0
+        self.static_start_time = None  # 记录开始静止的时间
         
         # 像素检测设置
         self.cursor_blink_area = None
@@ -132,25 +134,49 @@ class FastCopilotMonitor:
         return hash_value
     
     def detect_static_content(self, image: np.ndarray) -> bool:
-        """检测内容是否静止不变"""
+        """检测内容是否停止超过2分钟"""
         current_hash = self.calculate_image_hash(image)
+        current_time = time.time()
         
         if self.last_screenshot_hash == current_hash:
+            # 如果是第一次检测到停止，记录开始时间
+            if self.static_start_time is None:
+                self.static_start_time = current_time
+                self.logger.info("⏸️ 开始检测停止状态...")
+            
             self.static_counter += 1
             self.detection_stats['static_detections'] += 1
-            self.logger.info(f"🔄 静态内容检测: {self.static_counter}/{self.static_threshold} (哈希匹配)")
+            
+            # 计算已经停止的时间
+            static_duration = current_time - self.static_start_time
+            remaining_time = max(0, self.min_static_duration - static_duration)
+            
+            if remaining_time > 0:
+                self.logger.info(f"⏱️ 停止时间: {static_duration:.1f}秒 / {self.min_static_duration}秒 (还需 {remaining_time:.1f}秒)")
+            else:
+                self.logger.info(f"✅ 停止时间: {static_duration:.1f}秒 (已超过2分钟)")
         else:
             if self.static_counter > 0:
-                self.logger.info(f"🔄 图像变化，重置静态计数 (从 {self.static_counter} 重置为 0)")
+                elapsed = current_time - self.static_start_time if self.static_start_time else 0
+                self.logger.info(f"🔄 检测到变化，重置停止计时 (已停止 {elapsed:.1f}秒)")
+            
             self.static_counter = 0
+            self.static_start_time = None
             self.last_screenshot_hash = current_hash
             self.logger.debug("🖼️ 检测到图像变化")
         
-        is_static = self.static_counter >= self.static_threshold
-        if is_static:
-            self.logger.info(f"⏹️ 检测到静态状态！连续 {self.static_counter} 次相同图像")
+        # 判断条件：达到停止阈值 AND 超过2分钟
+        is_static_enough = self.static_counter >= self.static_threshold
+        is_time_enough = (self.static_start_time is not None and 
+                         current_time - self.static_start_time >= self.min_static_duration)
         
-        return is_static
+        is_truly_stopped = is_static_enough and is_time_enough
+        
+        if is_truly_stopped:
+            static_duration = current_time - self.static_start_time
+            self.logger.info(f"🛑 确认Copilot停止！已停止 {static_duration:.1f}秒")
+        
+        return is_truly_stopped
     
     def detect_cursor_activity(self, image: np.ndarray) -> bool:
         """检测光标活动"""
@@ -323,58 +349,47 @@ class FastCopilotMonitor:
             return {}
 
     def analyze_status_by_pixels(self, image: np.ndarray) -> str:
-        """通过像素分析判断状态 - 增强版"""
+        """简化状态分析 - 只要停止超过2分钟就判断为停止"""
         self.detection_stats['total_checks'] += 1
         
-        self.logger.debug("🔍 开始增强状态分析...")
+        self.logger.debug("🔍 开始状态分析...")
         
-        # 原有检测方法
+        # 主要检测：内容是否停止超过2分钟
+        is_truly_stopped = self.detect_static_content(image)
+        
+        # 辅助检测
         has_cursor_activity = self.detect_cursor_activity(image)
         has_loading_animation = self.detect_loading_animation(image)
-        is_static = self.detect_static_content(image)
         
-        # 新增检测方法
-        has_stop_indicators = self.detect_stop_indicators(image)
-        has_completion_patterns = self.detect_completion_patterns(image)
-        interface_elements = self.detect_interface_elements(image)
-        
-        # 综合分析状态
-        if has_loading_animation:
+        # 简化的状态判断逻辑
+        if is_truly_stopped:
+            # 停止超过2分钟
+            status = "stopped"
+            self.logger.info("🛑 状态判断: STOPPED (停止超过2分钟)")
+        elif has_loading_animation:
             status = "thinking"
             self.logger.info("🤔 状态判断: THINKING (检测到加载动画)")
-        elif has_stop_indicators or has_completion_patterns:
-            status = "stopped"
-            indicators = []
-            if has_stop_indicators:
-                indicators.append("停止指示器")
-            if has_completion_patterns:
-                indicators.append("完成模式")
-            self.logger.info(f"🛑 状态判断: STOPPED (检测到: {', '.join(indicators)})")
         elif has_cursor_activity:
             status = "waiting_input"
             self.logger.info("⌨️ 状态判断: WAITING_INPUT (检测到光标活动)")
-        elif is_static and interface_elements.get('interface_stable', False):
-            # 增强的静态检测：界面稳定且内容静止
-            if interface_elements.get('has_content', False):
-                status = "stopped"
-                self.logger.info("⏹️ 状态判断: STOPPED (界面稳定且内容静止)")
-            else:
-                status = "active"
-                self.logger.info("🟡 状态判断: ACTIVE (界面稳定但无明确内容)")
-        elif is_static:
-            status = "stopped"
-            self.logger.info("⏹️ 状态判断: STOPPED (内容静止)")
+        elif self.static_counter > 0:
+            # 正在停止中，但还没到2分钟
+            status = "active"
+            remaining_time = 0
+            if self.static_start_time:
+                elapsed = time.time() - self.static_start_time
+                remaining_time = max(0, self.min_static_duration - elapsed)
+            self.logger.info(f"🟡 状态判断: ACTIVE (停止中，还需 {remaining_time:.1f}秒到2分钟)")
         else:
             status = "active"
             self.logger.info("🟢 状态判断: ACTIVE (内容变化中)")
         
-        # 输出详细的检测结果
-        self.logger.debug("📊 检测结果汇总:")
+        # 输出简化的检测结果
+        self.logger.debug("📊 检测结果:")
+        self.logger.debug(f"   停止超过2分钟: {is_truly_stopped}")
+        self.logger.debug(f"   停止计数: {self.static_counter}/{self.static_threshold}")
         self.logger.debug(f"   光标活动: {has_cursor_activity}")
         self.logger.debug(f"   加载动画: {has_loading_animation}")
-        self.logger.debug(f"   内容静止: {is_static}")
-        self.logger.debug(f"   停止指示器: {has_stop_indicators}")
-        self.logger.debug(f"   完成模式: {has_completion_patterns}")
         self.logger.debug(f"   最终状态: {status}")
         
         return status
@@ -512,19 +527,25 @@ class FastCopilotMonitor:
                 
                 self.logger.info(f"📊 当前状态: {status}, 距离上次操作: {time_since_last_action:.1f}秒")
                 
-                # 快速检测：如果是静态状态且超过冷却时间
+                # 检测：如果停止超过2分钟且超过冷却时间
                 if status == "stopped" and time_since_last_action > self.cooldown_time:
-                    self.logger.info(f"🎯 检测到停止状态！(静态计数: {self.static_counter})")
+                    self.logger.info(f"🎯 Copilot已停止超过2分钟！")
                     if self.send_continue_command(window):
                         self.logger.info("✅ 命令发送成功")
                         self.static_counter = 0
+                        self.static_start_time = None  # 重置停止开始时间
                         self.last_screenshot_hash = None
                         self.print_stats()
                     else:
                         self.logger.error("❌ 命令发送失败")
                 elif status == "stopped":
                     remaining_time = self.cooldown_time - time_since_last_action
-                    self.logger.info(f"⏳ 检测到静态，但仍在冷却期 (剩余: {remaining_time:.1f}秒)")
+                    self.logger.info(f"⏳ Copilot已停止，但仍在冷却期 (剩余: {remaining_time:.1f}秒)")
+                elif self.static_counter > 0:
+                    # 显示停止进度
+                    elapsed = time.time() - self.static_start_time if self.static_start_time else 0
+                    remaining = max(0, self.min_static_duration - elapsed)
+                    self.logger.info(f"⏱️ 停止进度: {elapsed:.1f}/{self.min_static_duration}秒 (还需 {remaining:.1f}秒)")
                 
                 # 每10次检测打印一次统计
                 if self.detection_stats['total_checks'] % 10 == 0:
@@ -543,13 +564,13 @@ class FastCopilotMonitor:
     def start(self):
         """启动监控"""
         self.running = True
-        print("🚀 快速监控模式启动 (增强检测版)")
+        print("🚀 Copilot监控工具启动 (2分钟停止检测)")
         print(f"⚡ 每 {self.check_interval} 秒检测一次")
-        print(f"⚡ 连续 {self.static_threshold} 次静态后判断为停止")
-        print(f"⚡ 预计最快 {self.check_interval * self.static_threshold} 秒检测到停止状态")
-        print(f"⚡ 冷却时间 {self.cooldown_time} 秒")
+        print(f"⚡ 停止判断: 连续停止 {self.min_static_duration} 秒 (2分钟)")
+        print(f"⚡ 检测阈值: {self.static_threshold} 次 (约 {self.static_threshold * self.check_interval} 秒)")
+        print(f"⚡ 冷却时间: {self.cooldown_time} 秒")
         print(f"📝 新窗口消息: '{self.new_window_message}'")
-        print("🔍 使用多维度增强检测算法")
+        print("🎯 逻辑: 只要停止超过2分钟，就发送继续命令")
         print("📋 按 Ctrl+C 停止监控")
         print("=" * 50)
         
@@ -568,25 +589,25 @@ class FastCopilotMonitor:
 
 def main():
     """主函数"""
-    print("🚀 VS Code Copilot Chat 快速监控工具 (增强检测版)")
+    print("🚀 VS Code Copilot Chat 监控工具")
+    print("🎯 核心逻辑: 只要停止超过2分钟，就认为Copilot停止了")
     print("=" * 50)
-    print("⚡ 优化设置：")
-    print("   • 检测间隔: 5秒（比标准版快3倍）")
-    print("   • 静态阈值: 2次（比标准版快1.5倍）")
-    print("   • 冷却时间: 30秒（比标准版快2倍）")
-    print("   • 预计最快检测: 10秒")
+    print("⚡ 检测设置：")
+    print("   • 检测间隔: 5秒")
+    print("   • 停止判断: 连续停止120秒（2分钟）")
+    print("   • 检测阈值: 3次 (15秒后开始计时)")
+    print("   • 冷却时间: 30秒")
     print()
-    print("🆕 新功能：")
-    print("   • 详细检测日志输出")
-    print("   • 优先使用现有Chat窗口")
-    print("   • 新窗口发送: '按照指令修改代码'")
-    print("   • 检测统计信息")
+    print("🎯 工作原理：")
+    print("   • 每5秒截图检测Copilot Chat区域")
+    print("   • 连续3次相同画面后开始计时")
+    print("   • 停止超过2分钟自动发送继续命令")
+    print("   • 如有变化立即重新开始计时")
     print()
-    print("🔍 增强检测算法：")
-    print("   • 停止指示器检测（深色比例、边缘密度、文本密度）")
-    print("   • 完成模式检测（水平/垂直线条分析）")
-    print("   • 界面元素检测（输入区、内容区、顶部区域）")
-    print("   • 多维度状态综合分析")
+    print("📝 自动操作：")
+    print("   • 优先使用现有Chat窗口发送'continue'")
+    print("   • 如失败则打开新窗口发送'按照指令修改代码'")
+    print("   • 详细日志显示停止进度和剩余时间")
     print()
     print("📋 需要的依赖：")
     print("   pip install pyautogui pygetwindow opencv-python pillow")
