@@ -31,7 +31,7 @@ class FastCopilotMonitor:
         self.check_interval = 5   # 5秒检查一次
         self.static_threshold = 3  # 连续3次相同即开始计时 (减少误判)
         self.cooldown_time = 30   # 30秒冷却时间
-        self.min_static_duration = 30  # 最小静止时间：30秒
+        self.min_static_duration = 10  # 最小静止时间：30秒
         
         self.vscode_title = 'Visual Studio Code'
         self.continue_command = 'continue'
@@ -361,25 +361,34 @@ class FastCopilotMonitor:
         has_cursor_activity = self.detect_cursor_activity(image)
         has_loading_animation = self.detect_loading_animation(image)
         
-        # 简化的状态判断逻辑
+        # 改进的状态判断逻辑 - 优先考虑停止状态，减少加载动画误判
         if is_truly_stopped:
-            # 停止超过30秒
+            # 停止超过30秒，即使有加载动画也认为已停止
             status = "stopped"
             self.logger.info("🛑 状态判断: STOPPED (停止超过30秒)")
+        elif self.static_counter > 0:
+            # 正在停止中，但还没到30秒
+            remaining_time = 0
+            if self.static_start_time:
+                elapsed = time.time() - self.static_start_time
+                remaining_time = max(0, self.min_static_duration - elapsed)
+            
+            # 如果有加载动画但已经停止很久，优先考虑停止
+            if elapsed > 25:  # 25秒后即使有动画也开始怀疑
+                status = "stopped" if elapsed >= 30 else "probably_stopped"
+                self.logger.info(f"⚠️ 状态判断: {'STOPPED' if status == 'stopped' else 'PROBABLY_STOPPED'} (停止 {elapsed:.1f}秒，即使检测到动画)")
+            elif has_loading_animation:
+                status = "thinking"
+                self.logger.info(f"🤔 状态判断: THINKING (停止中 {elapsed:.1f}秒，有加载动画)")
+            else:
+                status = "active"
+                self.logger.info(f"🟡 状态判断: ACTIVE (停止中，还需 {remaining_time:.1f}秒到30秒)")
         elif has_loading_animation:
             status = "thinking"
             self.logger.info("🤔 状态判断: THINKING (检测到加载动画)")
         elif has_cursor_activity:
             status = "waiting_input"
             self.logger.info("⌨️ 状态判断: WAITING_INPUT (检测到光标活动)")
-        elif self.static_counter > 0:
-            # 正在停止中，但还没到30秒
-            status = "active"
-            remaining_time = 0
-            if self.static_start_time:
-                elapsed = time.time() - self.static_start_time
-                remaining_time = max(0, self.min_static_duration - elapsed)
-            self.logger.info(f"🟡 状态判断: ACTIVE (停止中，还需 {remaining_time:.1f}秒到30秒)")
         else:
             status = "active"
             self.logger.info("🟢 状态判断: ACTIVE (内容变化中)")
@@ -452,41 +461,124 @@ class FastCopilotMonitor:
                 bottom_lines = []
                 height = right_region.shape[0]
                 
-                # 只考虑底部30%的区域
-                bottom_threshold = int(height * 0.7)
+                # 只考虑底部20%的区域，但不要太靠底部（避开状态栏）
+                bottom_threshold = int(height * 0.75)  # 从75%开始
+                status_bar_threshold = int(height * 0.95)  # 到95%结束，避开状态栏
                 
                 for i in range(len(horizontal_coords[0])):
                     y = horizontal_coords[0][i]
                     x = horizontal_coords[1][i]
                     
-                    if y > bottom_threshold:  # 在底部区域
+                    if bottom_threshold < y < status_bar_threshold:  # 在底部区域但避开状态栏
                         bottom_lines.append((x, y))
                 
-                if bottom_lines:
+                if bottom_lines and len(bottom_lines) > 5:  # 需要足够的线条才认为是有效检测
                     # 找到最常见的y坐标 (输入框的边界)
                     y_coords = [line[1] for line in bottom_lines]
                     y_coords.sort()
                     
-                    # 使用最底部的线作为输入框位置
-                    input_y_relative = y_coords[-10] if len(y_coords) > 10 else y_coords[-1]
+                    # 使用中位数位置，更稳定
+                    median_index = len(y_coords) // 2
+                    input_y_relative = y_coords[median_index]
                     
-                    # 输入框通常在Chat面板的中央
+                    # 输入框通常在Chat面板的中央偏左
                     input_x_relative = right_region.shape[1] // 2
                     
-                    # 转换为绝对坐标
+                    # 转换为绝对坐标 - 重要：需要向下偏移到输入框内部
                     input_x = window.left + right_region_start + input_x_relative
-                    input_y = window.top + input_y_relative - 10  # 稍微向上偏移到输入框内部
+                    # 改为向下偏移25像素，确保点击到输入框中央区域
+                    input_y = window.top + input_y_relative + 25  
                     
-                    self.logger.info(f"✅ 智能检测到输入框位置: ({input_x}, {input_y})")
-                    return (input_x, input_y)
+                    # 额外验证：确保不会点击到状态栏区域
+                    if input_y < window.top + window.height - 50:  # 确保距离底部至少50像素
+                        self.logger.info(f"✅ 智能检测到输入框位置: ({input_x}, {input_y})")
+                        self.logger.debug(f"   检测基础: 找到{len(bottom_lines)}条线，向下偏移25px到输入框中央")
+                        return (input_x, input_y)
+                    else:
+                        self.logger.warning(f"⚠️ 智能检测位置太接近底部，放弃: y={input_y}, 窗口底部={window.top + window.height}")
+                else:
+                    self.logger.debug(f"⚠️ 底部线条不足({len(bottom_lines)}条)，智能检测失效")
             
-            self.logger.debug("⚠️ 未能智能检测到输入框，使用默认位置")
-            return None
+            # 如果智能检测失败，使用改进的默认位置计算
+            self.logger.debug("⚠️ 智能检测失败，使用改进的默认位置")
+            
+            # 基于实际测试结果改进的位置计算
+            # Chat面板通常在右侧60%开始，占40%宽度
+            chat_region_start = int(window.width * 0.6)   # 从60%开始
+            chat_region_width = int(window.width * 0.4)   # Chat区域占40%
+            
+            # 输入框位置：Chat区域的中央偏左，距离底部更远避开状态栏
+            input_x_offset = int(chat_region_width * 0.5)  # Chat区域的50%位置（中央）
+            input_y_offset = window.height - 70  # 距离底部70像素，确保在输入框中央
+            
+            input_x = window.left + chat_region_start + input_x_offset
+            input_y = window.top + input_y_offset
+            
+            self.logger.info(f"✅ 使用改进默认位置: ({input_x}, {input_y})")
+            self.logger.debug(f"   计算基础: 窗口({window.width}x{window.height}), Chat区域从{chat_region_start}开始+{input_x_offset}, 距底部{window.height - input_y_offset}px")
+            
+            # 生成调试截图
+            if hasattr(self, '_debug_counter'):
+                self._debug_counter += 1
+            else:
+                self._debug_counter = 1
+            
+            # 每5次检测保存一次调试截图
+            if self._debug_counter % 5 == 1:
+                self._save_debug_screenshot_with_position(window, (input_x, input_y))
+            
+            return (input_x, input_y)
             
         except Exception as e:
             self.logger.warning(f"❌ 智能查找输入框失败: {e}")
             return None
     
+    def _save_debug_screenshot_with_position(self, window: gw.Win32Window, position: Tuple[int, int]):
+        """保存带位置标记的调试截图"""
+        try:
+            screenshot = pyautogui.screenshot(region=(
+                window.left, window.top, window.width, window.height
+            ))
+            debug_image = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+            
+            # 计算相对坐标
+            rel_x = position[0] - window.left
+            rel_y = position[1] - window.top
+            
+            # 画标记
+            cv2.circle(debug_image, (rel_x, rel_y), 15, (0, 255, 0), 3)  # 绿色圆圈 - 实际点击位置
+            cv2.line(debug_image, (rel_x - 30, rel_y), (rel_x + 30, rel_y), (0, 0, 255), 2)  # 红色十字
+            cv2.line(debug_image, (rel_x, rel_y - 30), (rel_x, rel_y + 30), (0, 0, 255), 2)
+            
+            # 标记可能的边框位置（比点击位置高25像素）
+            border_y = rel_y - 25
+            if border_y > 0:
+                cv2.line(debug_image, (rel_x - 40, border_y), (rel_x + 40, border_y), (255, 0, 255), 2)  # 紫色线 - 可能的边框
+                cv2.putText(debug_image, "Detected Border", (rel_x + 50, border_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+            
+            # 添加位置信息
+            cv2.putText(debug_image, f"Click: ({rel_x},{rel_y})", 
+                       (rel_x + 40, rel_y - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(debug_image, f"Absolute: ({position[0]},{position[1]})", 
+                       (rel_x + 40, rel_y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+            
+            # 标记搜索区域边界
+            chat_start = int(debug_image.shape[1] * 0.6)  # 更新为60%
+            cv2.line(debug_image, (chat_start, 0), (chat_start, debug_image.shape[0]), (255, 255, 0), 2)
+            cv2.putText(debug_image, "Chat Area", (chat_start + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            
+            # 标记避免区域（状态栏）
+            status_bar_y = int(debug_image.shape[0] * 0.95)
+            cv2.line(debug_image, (0, status_bar_y), (debug_image.shape[1], status_bar_y), (0, 0, 255), 2)
+            cv2.putText(debug_image, "Status Bar (Avoid)", (10, status_bar_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            
+            filename = f"input_box_debug_{int(time.time())}.png"
+            cv2.imwrite(filename, debug_image)
+            self.logger.info(f"🖼️ 调试截图已保存: {filename}")
+            
+        except Exception as e:
+            self.logger.warning(f"❌ 保存调试截图失败: {e}")
+
     def send_continue_command(self, window: gw.Win32Window) -> bool:
         """发送继续命令 - 增强版，确保真正发送成功"""
         try:
@@ -527,43 +619,19 @@ class FastCopilotMonitor:
         try:
             self.logger.debug("📝 直接输入continue命令")
             
-            # 获取窗口信息用于计算点击位置
-            vscode_window = self.find_vscode_window()
-            if vscode_window:
-                # 首先尝试智能查找输入框
-                smart_position = self.find_chat_input_box(vscode_window)
-                
-                if smart_position:
-                    input_x, input_y = smart_position
-                    self.logger.info(f"🎯 使用智能检测位置: ({input_x}, {input_y})")
-                else:
-                    # 备用方案：使用计算的位置
-                    # Chat面板通常占右侧40%的宽度
-                    chat_panel_left = vscode_window.left + int(vscode_window.width * 0.6)
-                    chat_panel_width = int(vscode_window.width * 0.4)
-                    
-                    # 输入框在Chat面板的最底部，但要避开滚动条
-                    input_x = chat_panel_left + int(chat_panel_width * 0.5)  # Chat面板中心
-                    input_y = vscode_window.top + vscode_window.height - 80  # 距离底部80像素，更保守
-                    
-                    self.logger.info(f"🖱️ 使用计算位置: ({input_x}, {input_y})")
-                
-                self.logger.debug(f"   窗口范围: ({vscode_window.left}, {vscode_window.top}) - ({vscode_window.left + vscode_window.width}, {vscode_window.top + vscode_window.height})")
-                
-                # 多次点击确保焦点正确
-                pyautogui.click(input_x, input_y)
-                time.sleep(0.2)
-                pyautogui.click(input_x, input_y)  # 双击确保焦点
-                time.sleep(0.3)
-                
-                # 额外尝试：按Tab键导航到输入框 (如果点击位置不对)
-                pyautogui.press('tab')
-                time.sleep(0.1)
-                pyautogui.press('tab')
-                time.sleep(0.1)
-                
-            else:
-                self.logger.warning("⚠️ 无法获取窗口信息，尝试直接输入")
+            # 首先确保Copilot Chat窗口有焦点
+            self.logger.info("🎯 使用 Ctrl+Shift+I 激活Copilot Chat")
+            pyautogui.hotkey('ctrl', 'shift', 'i')
+            time.sleep(1.0)  # 等待窗口激活
+            
+            # 不再使用点击，直接使用键盘导航到输入框
+            self.logger.info("⌨️ 使用键盘导航到输入框")
+            
+            # 使用Tab键导航到输入框
+            #pyautogui.press('tab')
+            time.sleep(0.1)
+            #pyautogui.press('tab')
+            time.sleep(0.1)
             
             # 清空可能存在的内容
             pyautogui.hotkey('ctrl', 'a')  # 全选
@@ -716,8 +784,8 @@ class FastCopilotMonitor:
                 
                 self.logger.info(f"📊 当前状态: {status}, 距离上次操作: {time_since_last_action:.1f}秒")
                 
-                # 检测：如果停止超过30秒且超过冷却时间
-                if status == "stopped" and time_since_last_action > self.cooldown_time:
+                # 检测：如果停止超过30秒且超过冷却时间 (包括probably_stopped状态)
+                if (status == "stopped" or status == "probably_stopped") and time_since_last_action > self.cooldown_time:
                     self.logger.info(f"🎯 Copilot已停止超过30秒！")
                     if self.send_continue_command(window):
                         self.logger.info("✅ 命令发送成功")
