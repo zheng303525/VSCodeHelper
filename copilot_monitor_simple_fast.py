@@ -166,7 +166,7 @@ class FastCopilotMonitor:
                 activity_level = np.sum(diff > 30)
                 self.last_cursor_state = input_area.copy()
                 
-                is_cursor_active = 5 < activity_level < 100
+                is_cursor_active = bool(5 < activity_level < 100)
                 
                 self.logger.debug(f"👆 光标活动级别: {activity_level}, 活跃: {is_cursor_active}")
                 
@@ -206,28 +206,176 @@ class FastCopilotMonitor:
             self.logger.error(f"❌ 检测加载动画时出错: {e}")
             return False
     
+    def detect_stop_indicators(self, image: np.ndarray) -> bool:
+        """检测明确的停止指示器"""
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # 检测方法1: 查找停止按钮或完成指示器
+            # 通常Copilot停止时会显示停止按钮或完成状态
+            
+            # 检测深色区域 (可能是停止按钮)
+            dark_pixels = np.sum(gray < 50)
+            total_pixels = gray.shape[0] * gray.shape[1]
+            dark_ratio = dark_pixels / total_pixels
+            
+            # 检测边缘 (停止状态通常有清晰的边界)
+            edges = cv2.Canny(gray, 50, 150)
+            edge_density = np.sum(edges > 0) / total_pixels
+            
+            # 检测文本区域的密度 (停止时文本通常更少)
+            binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+            text_density = np.sum(binary == 0) / total_pixels
+            
+            self.logger.debug(f"🛑 停止指示器检测:")
+            self.logger.debug(f"   深色比例: {dark_ratio:.3f}")
+            self.logger.debug(f"   边缘密度: {edge_density:.3f}")
+            self.logger.debug(f"   文本密度: {text_density:.3f}")
+            
+            # 判断条件：深色区域较少，边缘清晰，文本密度适中
+            is_stopped = (
+                0.02 < dark_ratio < 0.15 and  # 深色区域不太多不太少
+                edge_density > 0.01 and        # 有一定的边缘结构
+                0.1 < text_density < 0.4       # 文本密度适中
+            )
+            
+            if is_stopped:
+                self.logger.info("🛑 检测到停止指示器特征")
+            
+            return is_stopped
+            
+        except Exception as e:
+            self.logger.error(f"❌ 检测停止指示器时出错: {e}")
+            return False
+    
+    def detect_completion_patterns(self, image: np.ndarray) -> bool:
+        """检测完成模式 - 通过模板匹配"""
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # 检测水平线条 (完成后常见的分隔线)
+            horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
+            horizontal_lines = cv2.morphologyEx(gray, cv2.MORPH_OPEN, horizontal_kernel)
+            
+            # 检测垂直结构 (停止状态的侧边栏)
+            vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
+            vertical_lines = cv2.morphologyEx(gray, cv2.MORPH_OPEN, vertical_kernel)
+            
+            # 统计线条数量
+            horizontal_count = np.sum(horizontal_lines > 100)
+            vertical_count = np.sum(vertical_lines > 100)
+            
+            self.logger.debug(f"📐 完成模式检测:")
+            self.logger.debug(f"   水平线条: {horizontal_count}")
+            self.logger.debug(f"   垂直线条: {vertical_count}")
+            
+            # 判断是否有完成的结构特征
+            has_completion_pattern = bool(horizontal_count > 100 or vertical_count > 50)
+            
+            if has_completion_pattern:
+                self.logger.info("📐 检测到完成模式特征")
+            
+            return has_completion_pattern
+            
+        except Exception as e:
+            self.logger.error(f"❌ 检测完成模式时出错: {e}")
+            return False
+    
+    def detect_interface_elements(self, image: np.ndarray) -> dict:
+        """检测界面元素来判断状态"""
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            height, width = gray.shape
+            
+            # 检测输入框区域 (通常在底部)
+            input_region = gray[int(height * 0.8):, :]
+            input_variance = float(np.var(input_region.astype(np.float64)))
+            
+            # 检测内容区域 (中部)
+            content_region = gray[int(height * 0.2):int(height * 0.8), :]
+            content_variance = float(np.var(content_region.astype(np.float64)))
+            
+            # 检测顶部区域 (标题栏)
+            top_region = gray[:int(height * 0.2), :]
+            top_variance = float(np.var(top_region.astype(np.float64)))
+            
+            elements = {
+                'input_variance': input_variance,
+                'content_variance': content_variance,
+                'top_variance': top_variance,
+                'has_input_focus': bool(input_variance > 100),
+                'has_content': bool(content_variance > 50),
+                'interface_stable': bool(top_variance < 200)
+            }
+            
+            self.logger.debug(f"🎛️ 界面元素检测:")
+            self.logger.debug(f"   输入区变化: {input_variance:.1f}")
+            self.logger.debug(f"   内容区变化: {content_variance:.1f}")
+            self.logger.debug(f"   顶部区变化: {top_variance:.1f}")
+            self.logger.debug(f"   输入焦点: {elements['has_input_focus']}")
+            self.logger.debug(f"   有内容: {elements['has_content']}")
+            self.logger.debug(f"   界面稳定: {elements['interface_stable']}")
+            
+            return elements
+            
+        except Exception as e:
+            self.logger.error(f"❌ 检测界面元素时出错: {e}")
+            return {}
+
     def analyze_status_by_pixels(self, image: np.ndarray) -> str:
-        """通过像素分析判断状态"""
+        """通过像素分析判断状态 - 增强版"""
         self.detection_stats['total_checks'] += 1
         
-        self.logger.debug("🔍 开始状态分析...")
+        self.logger.debug("🔍 开始增强状态分析...")
         
+        # 原有检测方法
         has_cursor_activity = self.detect_cursor_activity(image)
         has_loading_animation = self.detect_loading_animation(image)
         is_static = self.detect_static_content(image)
         
+        # 新增检测方法
+        has_stop_indicators = self.detect_stop_indicators(image)
+        has_completion_patterns = self.detect_completion_patterns(image)
+        interface_elements = self.detect_interface_elements(image)
+        
+        # 综合分析状态
         if has_loading_animation:
             status = "thinking"
             self.logger.info("🤔 状态判断: THINKING (检测到加载动画)")
+        elif has_stop_indicators or has_completion_patterns:
+            status = "stopped"
+            indicators = []
+            if has_stop_indicators:
+                indicators.append("停止指示器")
+            if has_completion_patterns:
+                indicators.append("完成模式")
+            self.logger.info(f"🛑 状态判断: STOPPED (检测到: {', '.join(indicators)})")
         elif has_cursor_activity:
             status = "waiting_input"
             self.logger.info("⌨️ 状态判断: WAITING_INPUT (检测到光标活动)")
+        elif is_static and interface_elements.get('interface_stable', False):
+            # 增强的静态检测：界面稳定且内容静止
+            if interface_elements.get('has_content', False):
+                status = "stopped"
+                self.logger.info("⏹️ 状态判断: STOPPED (界面稳定且内容静止)")
+            else:
+                status = "active"
+                self.logger.info("🟡 状态判断: ACTIVE (界面稳定但无明确内容)")
         elif is_static:
             status = "stopped"
             self.logger.info("⏹️ 状态判断: STOPPED (内容静止)")
         else:
             status = "active"
             self.logger.info("🟢 状态判断: ACTIVE (内容变化中)")
+        
+        # 输出详细的检测结果
+        self.logger.debug("📊 检测结果汇总:")
+        self.logger.debug(f"   光标活动: {has_cursor_activity}")
+        self.logger.debug(f"   加载动画: {has_loading_animation}")
+        self.logger.debug(f"   内容静止: {is_static}")
+        self.logger.debug(f"   停止指示器: {has_stop_indicators}")
+        self.logger.debug(f"   完成模式: {has_completion_patterns}")
+        self.logger.debug(f"   最终状态: {status}")
         
         return status
     
@@ -395,12 +543,13 @@ class FastCopilotMonitor:
     def start(self):
         """启动监控"""
         self.running = True
-        print("🚀 快速监控模式启动 (详细日志版)")
+        print("🚀 快速监控模式启动 (增强检测版)")
         print(f"⚡ 每 {self.check_interval} 秒检测一次")
         print(f"⚡ 连续 {self.static_threshold} 次静态后判断为停止")
         print(f"⚡ 预计最快 {self.check_interval * self.static_threshold} 秒检测到停止状态")
         print(f"⚡ 冷却时间 {self.cooldown_time} 秒")
         print(f"📝 新窗口消息: '{self.new_window_message}'")
+        print("🔍 使用多维度增强检测算法")
         print("📋 按 Ctrl+C 停止监控")
         print("=" * 50)
         
@@ -419,7 +568,7 @@ class FastCopilotMonitor:
 
 def main():
     """主函数"""
-    print("🚀 VS Code Copilot Chat 快速监控工具 (详细日志版)")
+    print("🚀 VS Code Copilot Chat 快速监控工具 (增强检测版)")
     print("=" * 50)
     print("⚡ 优化设置：")
     print("   • 检测间隔: 5秒（比标准版快3倍）")
@@ -432,6 +581,12 @@ def main():
     print("   • 优先使用现有Chat窗口")
     print("   • 新窗口发送: '按照指令修改代码'")
     print("   • 检测统计信息")
+    print()
+    print("🔍 增强检测算法：")
+    print("   • 停止指示器检测（深色比例、边缘密度、文本密度）")
+    print("   • 完成模式检测（水平/垂直线条分析）")
+    print("   • 界面元素检测（输入区、内容区、顶部区域）")
+    print("   • 多维度状态综合分析")
     print()
     print("📋 需要的依赖：")
     print("   pip install pyautogui pygetwindow opencv-python pillow")
