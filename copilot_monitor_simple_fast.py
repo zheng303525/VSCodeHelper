@@ -150,11 +150,11 @@ class FastCopilotMonitor:
                 param1=50, param2=30, minRadius=5, maxRadius=30
             )
             
-                                      has_loading = circles is not None and len(circles[0]) > 0
-             if has_loading:
-                 self.logger.debug("检测到可能的加载动画")
-             return bool(has_loading)
-         except Exception as e:
+            has_loading = circles is not None and len(circles[0]) > 0
+            if has_loading:
+                self.logger.debug("检测到可能的加载动画")
+            return bool(has_loading)
+        except Exception as e:
              self.logger.debug(f"检测加载动画时出错: {e}")
              return False
     
