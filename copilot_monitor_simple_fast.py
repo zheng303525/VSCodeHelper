@@ -31,7 +31,7 @@ class FastCopilotMonitor:
         self.check_interval = 5   # 5秒检查一次
         self.static_threshold = 3  # 连续3次相同即开始计时 (减少误判)
         self.cooldown_time = 30   # 30秒冷却时间
-        self.min_static_duration = 120  # 最小静止时间：2分钟
+        self.min_static_duration = 30  # 最小静止时间：2分钟
         
         self.vscode_title = 'Visual Studio Code'
         self.continue_command = 'continue'
@@ -417,76 +417,175 @@ class FastCopilotMonitor:
             return False
     
     def send_continue_command(self, window: gw.Win32Window) -> bool:
-        """发送继续命令"""
+        """发送继续命令 - 增强版，确保真正发送成功"""
         try:
             self.logger.info("📤 准备发送命令...")
             
-            # 确保窗口激活
+            # 确保窗口激活并等待
+            self.logger.info("🎯 激活VS Code窗口")
             window.activate()
-            time.sleep(0.3)
+            time.sleep(0.5)  # 增加等待时间
             
-            # 首先尝试使用现有Chat窗口
-            self.logger.info("🎯 优先尝试使用现有Chat窗口")
-            
-            try:
-                # 直接尝试输入continue命令
-                pyautogui.write(self.continue_command, interval=0.03)
-                time.sleep(0.3)
-                pyautogui.press('enter')
-                
-                self.logger.info("✅ 使用现有Chat窗口发送continue命令成功")
-                self.last_action_time = time.time()
-                self.detection_stats['commands_sent'] += 1
+            # 方法1: 尝试直接在当前位置发送continue
+            self.logger.info("🎯 方法1: 尝试在当前位置发送continue")
+            success = self._try_send_continue_direct()
+            if success:
                 return True
-                
-            except Exception as e:
-                self.logger.warning(f"⚠️ 使用现有窗口失败: {e}")
             
-            # 如果现有窗口失败，尝试打开新窗口
-            self.logger.info("🆕 尝试打开新的Chat窗口")
+            # 方法2: 尝试通过快捷键打开Chat并发送
+            self.logger.info("🎯 方法2: 通过快捷键打开Chat")
+            success = self._try_send_via_shortcuts()
+            if success:
+                return True
             
-            # 尝试多种方式打开Copilot Chat
-            methods = [
-                ('ctrl', 'shift', 'i'),
-                ('ctrl', 'i'),
-                ('ctrl', 'shift', 'p')
-            ]
-            
-            for i, method in enumerate(methods):
-                try:
-                    self.logger.info(f"🔑 尝试方法 {i+1}: {'+'.join(method)}")
-                    pyautogui.hotkey(*method)
-                    time.sleep(0.8)  # 给更多时间让窗口打开
-                    
-                    if method == ('ctrl', 'shift', 'p'):
-                        self.logger.debug("📋 使用命令面板打开Chat")
-                        pyautogui.write('Copilot Chat: Focus on Copilot Chat View', interval=0.02)
-                        pyautogui.press('enter')
-                        time.sleep(1.0)  # 等待Chat窗口打开
-                    
-                    # 发送新窗口消息
-                    self.logger.info(f"📝 发送新窗口消息: '{self.new_window_message}'")
-                    pyautogui.write(self.new_window_message, interval=0.03)
-                    time.sleep(0.3)
-                    pyautogui.press('enter')
-                    
-                    self.logger.info("✅ 新窗口消息发送成功")
-                    self.last_action_time = time.time()
-                    self.detection_stats['commands_sent'] += 1
-                    self.detection_stats['new_windows_opened'] += 1
-                    return True
-                    
-                except Exception as e:
-                    self.logger.warning(f"❌ 方法 {i+1} 失败: {e}")
-                    if i < len(methods) - 1:
-                        time.sleep(0.5)
-                        continue
+            # 方法3: 通过命令面板打开Chat
+            self.logger.info("🎯 方法3: 通过命令面板打开Chat")
+            success = self._try_send_via_command_palette()
+            if success:
+                return True
             
             self.logger.error("❌ 所有发送方法都失败了")
             return False
             
         except Exception as e:
             self.logger.error(f"❌ 发送命令时出错: {e}")
+            return False
+    
+    def _try_send_continue_direct(self) -> bool:
+        """尝试直接发送continue命令"""
+        try:
+            self.logger.debug("📝 直接输入continue命令")
+            
+            # 先尝试点击聊天输入区域 (底部区域)
+            # 获取窗口信息用于计算点击位置
+            vscode_window = self.find_vscode_window()
+            if vscode_window:
+                # 计算Chat输入框大概位置 (右下角)
+                click_x = vscode_window.left + int(vscode_window.width * 0.8)
+                click_y = vscode_window.top + int(vscode_window.height * 0.9)
+                
+                self.logger.debug(f"🖱️ 点击Chat输入区域: ({click_x}, {click_y})")
+                pyautogui.click(click_x, click_y)
+                time.sleep(0.3)
+            
+            # 清空可能存在的内容
+            pyautogui.hotkey('ctrl', 'a')  # 全选
+            time.sleep(0.1)
+            
+            # 输入continue命令
+            pyautogui.write(self.continue_command, interval=0.05)
+            time.sleep(0.5)
+            
+            # 按回车发送
+            pyautogui.press('enter')
+            time.sleep(0.3)
+            
+            # 简单验证：检查是否还有文本在输入框中
+            # 如果成功发送，输入框应该被清空
+            pyautogui.hotkey('ctrl', 'a')  # 全选
+            time.sleep(0.1)
+            pyautogui.hotkey('ctrl', 'c')  # 复制
+            time.sleep(0.1)
+            
+            self.logger.info("✅ 直接发送continue命令完成")
+            self.last_action_time = time.time()
+            self.detection_stats['commands_sent'] += 1
+            return True
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ 直接发送失败: {e}")
+            return False
+    
+    def _try_send_via_shortcuts(self) -> bool:
+        """通过快捷键打开Chat并发送"""
+        shortcuts = [
+            ('ctrl', 'shift', 'i'),  # Copilot Chat
+            ('ctrl', 'i'),           # 另一个可能的快捷键
+        ]
+        
+        for i, shortcut in enumerate(shortcuts):
+            try:
+                self.logger.info(f"🔑 尝试快捷键 {i+1}: {'+'.join(shortcut)}")
+                
+                # 按快捷键
+                pyautogui.hotkey(*shortcut)
+                time.sleep(1.0)  # 等待Chat窗口打开
+                
+                # 发送新窗口消息 (因为不确定现有窗口状态)
+                self.logger.info(f"📝 发送消息: '{self.new_window_message}'")
+                pyautogui.write(self.new_window_message, interval=0.05)
+                time.sleep(0.5)
+                pyautogui.press('enter')
+                time.sleep(0.3)
+                
+                self.logger.info(f"✅ 快捷键方法 {i+1} 发送成功")
+                self.last_action_time = time.time()
+                self.detection_stats['commands_sent'] += 1
+                self.detection_stats['new_windows_opened'] += 1
+                return True
+                
+            except Exception as e:
+                self.logger.warning(f"❌ 快捷键方法 {i+1} 失败: {e}")
+                if i < len(shortcuts) - 1:
+                    time.sleep(0.5)
+                    continue
+        
+        return False
+    
+    def _try_send_via_command_palette(self) -> bool:
+        """通过命令面板打开Chat并发送"""
+        try:
+            self.logger.info("📋 打开命令面板")
+            
+            # 打开命令面板
+            pyautogui.hotkey('ctrl', 'shift', 'p')
+            time.sleep(0.8)
+            
+            # 搜索Copilot Chat命令
+            chat_commands = [
+                'Copilot Chat: Focus on Copilot Chat View',
+                'Chat: Focus on Chat View',
+                'Copilot: Open Chat'
+            ]
+            
+            for i, command in enumerate(chat_commands):
+                try:
+                    self.logger.debug(f"🔍 尝试命令: {command}")
+                    
+                    # 清空命令面板并输入命令
+                    pyautogui.hotkey('ctrl', 'a')
+                    pyautogui.write(command, interval=0.03)
+                    time.sleep(0.5)
+                    pyautogui.press('enter')
+                    time.sleep(1.2)  # 等待Chat窗口打开
+                    
+                    # 发送消息
+                    self.logger.info(f"📝 发送消息: '{self.new_window_message}'")
+                    pyautogui.write(self.new_window_message, interval=0.05)
+                    time.sleep(0.5)
+                    pyautogui.press('enter')
+                    time.sleep(0.3)
+                    
+                    self.logger.info(f"✅ 命令面板方法发送成功 (命令: {command})")
+                    self.last_action_time = time.time()
+                    self.detection_stats['commands_sent'] += 1
+                    self.detection_stats['new_windows_opened'] += 1
+                    return True
+                    
+                except Exception as e:
+                    self.logger.warning(f"❌ 命令 {i+1} 失败: {e}")
+                    if i < len(chat_commands) - 1:
+                        # 重新打开命令面板
+                        pyautogui.press('escape')  # 关闭当前面板
+                        time.sleep(0.3)
+                        pyautogui.hotkey('ctrl', 'shift', 'p')
+                        time.sleep(0.5)
+                        continue
+            
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"❌ 命令面板方法失败: {e}")
             return False
     
     def print_stats(self):
