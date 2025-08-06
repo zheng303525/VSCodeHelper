@@ -31,7 +31,7 @@ class FastCopilotMonitor:
         self.check_interval = 5   # 5秒检查一次
         self.static_threshold = 3  # 连续3次相同即开始计时 (减少误判)
         self.cooldown_time = 30   # 30秒冷却时间
-        self.min_static_duration = 10  # 最小静止时间：30秒
+        self.min_static_duration = 120  # 最小静止时间：30秒
         
         self.vscode_title = 'Visual Studio Code'
         self.continue_command = 'continue'
