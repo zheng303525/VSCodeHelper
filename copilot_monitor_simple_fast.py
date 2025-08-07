@@ -31,7 +31,7 @@ class FastCopilotMonitor:
         self.check_interval = 5   # 5秒检查一次
         self.static_threshold = 3  # 连续3次相同即开始计时 (减少误判)
         self.cooldown_time = 30   # 30秒冷却时间
-        self.min_static_duration = 120  # 最小静止时间：30秒
+        self.min_static_duration = 10  # 最小静止时间：30秒
         
         self.vscode_title = 'Visual Studio Code'
         self.continue_command = 'continue'
@@ -112,7 +112,7 @@ class FastCopilotMonitor:
             chat_left = window.left + int(window.width * 0.6)
             chat_top = window.top + 60  # 跳过标题栏
             chat_width = int(window.width * 0.4)
-            chat_height = window.height - 120  # 减去标题栏和状态栏
+            chat_height = window.height - 200  # 减去标题栏和状态栏
             
             self.logger.debug(f"📷 截图区域: ({chat_left}, {chat_top}) 大小: {chat_width}x{chat_height}")
             
